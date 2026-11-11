@@ -464,8 +464,16 @@ function villageVote(g: Game, options: number[]): number | null {
     const topVotes = t.get(top) ?? 0;
     if (ls >= topScore - 6 && ls > -20 && leadVotes > topVotes) return lead;
   }
-  // Day 1 with nothing real to go on: a lone vote can exile a random villager, so hold it.
-  if (g.v.day === 1 && topScore < 6 && (t.get(top) ?? 0) === 0) return null;
+  // Day 1 with nothing real to go on: a lone vote can exile a random villager, so hold it,
+  // unless a thin wagon is about to exile someone I trust: then tie it with a vote on its driver.
+  if (g.v.day === 1 && topScore < 6 && (t.get(top) ?? 0) === 0) {
+    if (lead !== null && (sus.get(lead) ?? 0) < 3) {
+      const drivers = (g.votes.get(g.v.day) ?? []).filter((vt) => vt.target === lead && options.includes(vt.seat)).map((vt) => vt.seat);
+      const d = drivers.sort((a, b) => (sus.get(b) ?? 0) - (sus.get(a) ?? 0))[0];
+      if (d !== undefined && d !== lead) return d;
+    }
+    return null;
+  }
   return top;
 }
 
@@ -613,8 +621,7 @@ function seerSpeech(g: Game, round: number): string | null {
       : `${g.name(g.me)} here: I am the seer. I'm sharing my checks now so they aren't lost if I die.`;
   const parts: string[] = [opening];
   for (const r of res) {
-    const why = r.night === 1 && !claimedAlready ? ' (night 1 was a blind pick, I had nothing else to go on)' : '';
-    parts.push(`Night ${r.night}: ${g.tag(r.seat)} is ${r.werewolf ? 'a WEREWOLF' : 'not a werewolf'}${g.alive.has(r.seat) ? '' : ' (now dead)'}${why}.`);
+    parts.push(`Night ${r.night} I inspected ${g.tag(r.seat)}: ${r.werewolf ? 'a WEREWOLF' : 'not a werewolf'}${g.alive.has(r.seat) ? '' : ' (now dead)'}.`);
   }
   for (const c of rivals) parts.push(`${g.name(c.seat)} also claims seer, but I am the seer, so ${g.tag(c.seat)} is lying, and only a wolf lies about that.`);
   const tgt = wolves.length > 0 ? wolves[0].seat : rivals.length > 0 ? rivals[0].seat : null;
@@ -674,6 +681,16 @@ function villageSpeech(g: Game, round: number): string | null {
   }
   const head = [intro(g, k)];
   if (round === 1 && deathLine(g)) head.push(deathLine(g));
+  // Haiku tables exile whoever names nobody: always put a concrete (if soft) name on the record.
+  const accusers = [...new Set(g.saidToday().filter((sp) => sp.accuses.includes(g.me)).map((sp) => sp.seat))];
+  if (accusers.length >= 1) parts.unshift(`${g.name(accusers[0])}, I'm ${g.role === 'doctor' ? 'on the village side' : 'a villager'} and I'll answer plainly: my suspect is ${g.tag(top)}, and my votes will show it.`);
+  const named = parts.some((p) => /seat \d/.test(p));
+  if (!named && (round === 2 || g.v.day >= 2) && sc > -50) {
+    const caseBy = g.speeches.filter((sp) => sp.day >= g.v.day - 1 && sp.accuses.includes(top) && sp.seat !== top && sp.seat !== g.me && g.alive.has(sp.seat)).pop();
+    parts.push(caseBy
+      ? `My soft lean is ${g.tag(top)}, and I agree with ${g.name(caseBy.seat)}'s point about them. ${g.name(top)}, who do you suspect, and why?`
+      : `My soft lean is ${g.tag(top)}: they ${reasonAgainst(g, top, `soft${round}`)}. Not enough to exile on alone, but I want ${g.name(top)}'s answer.`);
+  }
   if (parts.length === 0) {
     parts.push(pick([
       `No hard read yet, so I won't push anyone on vibes. Seer, if you have a wolf check, share it with your reasons and we'll test it with the exile.`,
