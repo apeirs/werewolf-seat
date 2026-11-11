@@ -40,7 +40,6 @@ type Act = { target: number | null } | { text: string } | { pass: true };
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? 'http://store:8080').replace(/\/+$/, '');
 const SEED = process.env.MAKEFUN_TRIAL_SEED ?? '0';
 const TRACE = process.env.BOT_TRACE ?? '';
-const VARIANT = process.env.BOT_VARIANT ?? '';
 const MAX_SAY = 480;
 
 // ---------------------------------------------------------------- randomness keyed on the decision
@@ -310,6 +309,8 @@ class Game {
     if ([...this.seerClaims.values()].some((c) => this.claimProven(c))) {
       for (const c of live) add(c.seat, 300);
     }
+    // Hinting at hidden information is what a cautious seer or doctor does: keep them off the block.
+    for (const s of this.hinters) add(s, -8);
     // Doctor claims: mildly trusted unless broken.
     for (const [s] of this.docClaims) add(s, this.revealed.has(s) ? 0 : -8);
     // Exiles and the votes behind them.
@@ -521,7 +522,7 @@ function wolfVote(g: Game, options: number[]): number | null {
   }
   void cast;
   const mine = t.get(g.me) ?? 0;
-  if (doomed(g) && VARIANT !== 'noframe') {
+  if (doomed(g)) {
     const x = frameTarget(g);
     if (x !== null && options.includes(x)) return x;
   }
@@ -636,8 +637,8 @@ function seerSpeech(g: Game, round: number): string | null {
       parts.push(`${denied ? `${g.name(tgt)}'s denial answers nothing; every wolf says villager. ` : ''}I'm voting ${g.tag(tgt)}, and a split vote only helps the wolves. If I die tonight, my death proves these results. Doctor, guard me.`);
     }
   } else {
-    const sus = ranked(g.suspicion()).filter((s) => !g.myResults.has(s));
-    if (sus.length > 0) parts.push(`My cleared players are safe to trust. Of the rest, my strongest suspect is ${g.tag(sus[0])}: they ${reasonAgainst(g, sus[0], 'seerclaim')}. I'll check another player tonight.`);
+    // No wolf found yet: the table treats any name from the seer as a verdict, so name nobody.
+    parts.push(`No wolf among my checks yet, so I won't point at anyone on a guess. I'll check another player tonight and report it, and anyone who contradicts my results is lying.`);
   }
   return parts.join(' ');
 }
@@ -694,7 +695,8 @@ function villageSpeech(g: Game, round: number): string | null {
   const accusers = [...new Set(g.saidToday().filter((sp) => sp.accuses.includes(g.me)).map((sp) => sp.seat))];
   if (accusers.length >= 2 && top !== accusers[0]) parts.unshift(`${g.name(accusers[0])}, I'm ${g.role === 'doctor' ? 'on the village side' : 'a villager'}; my votes are on the record and I've hidden nothing.`);
   const named = parts.some((p) => /seat \d/.test(p));
-  if (!named && (round === 2 || g.v.day >= 2) && sc > -50) {
+  const powerish = g.hinters.has(top) || g.seerClaims.has(top) || g.docClaims.has(top);
+  if (!named && (round === 2 || g.v.day >= 2) && sc > 0 && !powerish) {
     const caseBy = g.speeches.filter((sp) => sp.day >= g.v.day - 1 && sp.accuses.includes(top) && sp.seat !== top && sp.seat !== g.me && g.alive.has(sp.seat)).pop();
     parts.push(caseBy
       ? `My soft lean is ${g.tag(top)}, and I agree with ${g.name(caseBy.seat)}'s point about them. ${g.name(top)}, who do you suspect, and why?`
@@ -839,8 +841,8 @@ function doomedSpeech(g: Game, round: number): string {
 function wolfSpeech(g: Game, round: number): string | null {
   const k = g.key('ws', round);
   const hostile = hostileSeer(g);
-  if (doomed(g) && VARIANT !== 'noframe') return doomedSpeech(g, round);
-  if (g.iClaimedSeer() || (hostile !== null && VARIANT !== 'noclaim')) {
+  if (doomed(g)) return doomedSpeech(g, round);
+  if (g.iClaimedSeer() || hostile !== null) {
     const rival = hostile ?? g.liveSeerClaims().find((c) => c.seat !== g.me && !g.isWolfTeam(c.seat))?.seat ?? null;
     return fakeSeerSpeech(g, round, rival);
   }
