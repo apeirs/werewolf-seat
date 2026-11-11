@@ -234,6 +234,9 @@ class Game {
   claimBroken(c: Claim): boolean {
     const r = this.revealed.get(c.seat);
     if (r && r !== 'seer') return true;
+    // The moderator already revealed the one seer elsewhere: this claim is a lie.
+    for (const [s, role] of this.revealed) if (role === 'seer' && s !== c.seat) return true;
+    if (this.role === 'seer' && c.seat !== this.me) return true;
     for (const [s, wolf] of c.results) {
       const role = this.revealed.get(s);
       if (role && (role === 'werewolf') !== wolf) return true;
@@ -605,7 +608,8 @@ function seerSpeech(g: Game, round: number): string | null {
   const claimedAlready = g.speeches.some((sp) => sp.seat === g.me && /I am the seer/.test(sp.text));
   const rivals = [...g.seerClaims.values()].filter((c) => c.seat !== g.me && g.alive.has(c.seat));
   const accusedMe = g.speeches.filter((sp) => sp.day === g.v.day && sp.accuses.includes(g.me)).length;
-  const shouldClaim = claimedAlready || wolves.length > 0 || rivals.length > 0 || g.v.day >= 2 || accusedMe >= 2;
+  // Haiku tables exile a vague player fast, and believe a specific claim: reveal by round 2 of day 1.
+  const shouldClaim = claimedAlready || wolves.length > 0 || rivals.length > 0 || g.v.day >= 2 || accusedMe >= 1 || round === 2;
   const k = g.key('seer', round);
   if (!shouldClaim) {
     const dl = round === 1 ? deathLine(g) : '';
@@ -669,6 +673,11 @@ function villageSpeech(g: Game, round: number): string | null {
     const bad = live.slice().sort((a, b) => (sus.get(b.seat) ?? 0) - (sus.get(a.seat) ?? 0))[0];
     parts.push(`Two seer claims: ${seatsWord(g, live.map((c) => c.seat))}. One is a wolf. I trust ${bad === live[0] ? g.tag(live[1].seat) : g.tag(live[0].seat)} more; ${g.tag(bad.seat)} looks like the fake.`);
   }
+  const deadSeer = [...g.revealed].find(([, r]) => r === 'seer')?.[0];
+  if (deadSeer !== undefined) {
+    const liars = [...g.seerClaims.values()].filter((c) => c.seat !== deadSeer && c.seat !== g.me && g.alive.has(c.seat)).map((c) => c.seat);
+    if (liars.length > 0) parts.push(`${g.tag(liars[0])} claims seer, but the moderator already revealed ${g.tag(deadSeer)} as the seer, and there is only one. That claim is a lie, so ${g.name(liars[0])} is a werewolf: vote ${g.tag(liars[0])}.`);
+  }
   for (const x of g.exiles) if (x.seat !== null && x.role === 'werewolf' && x.day === g.v.day - 1) {
     const defenders = g.speeches.filter((sp) => sp.defends.includes(x.seat as number) && g.alive.has(sp.seat) && sp.seat !== g.me).map((sp) => sp.seat);
     if (defenders.length > 0) parts.push(`${g.tag(defenders[0])} defended the wolf ${g.tag(x.seat)} yesterday; that matters.`);
@@ -683,7 +692,7 @@ function villageSpeech(g: Game, round: number): string | null {
   if (round === 1 && deathLine(g)) head.push(deathLine(g));
   // Haiku tables exile whoever names nobody: always put a concrete (if soft) name on the record.
   const accusers = [...new Set(g.saidToday().filter((sp) => sp.accuses.includes(g.me)).map((sp) => sp.seat))];
-  if (accusers.length >= 1) parts.unshift(`${g.name(accusers[0])}, I'm ${g.role === 'doctor' ? 'on the village side' : 'a villager'} and I'll answer plainly: my suspect is ${g.tag(top)}, and my votes will show it.`);
+  if (accusers.length >= 2 && top !== accusers[0]) parts.unshift(`${g.name(accusers[0])}, I'm ${g.role === 'doctor' ? 'on the village side' : 'a villager'}; my votes are on the record and I've hidden nothing.`);
   const named = parts.some((p) => /seat \d/.test(p));
   if (!named && (round === 2 || g.v.day >= 2) && sc > -50) {
     const caseBy = g.speeches.filter((sp) => sp.day >= g.v.day - 1 && sp.accuses.includes(top) && sp.seat !== top && sp.seat !== g.me && g.alive.has(sp.seat)).pop();
