@@ -389,6 +389,8 @@ function chooseKill(g: Game, options: number[]): number | null {
     // With a seer to guard, the doctor guards them: the doctor themself is the sure kill.
     if (docs.includes(s)) x += seer !== null && !seerOpen ? 130 : 50;
     if (g.hinters.has(s)) x += 70;
+    // My fake claim survives only while the real seer lives: let the vote take them, not the night.
+    if (g.iClaimedSeer() && !doomed(g) && g.seerClaims.has(s)) x -= 400;
     for (const sp of g.speeches) {
       if (sp.seat !== s) continue;
       const w = sp.day >= n - 1 ? 1 : 0.5;
@@ -508,6 +510,10 @@ function wolfVote(g: Game, options: number[]): number | null {
   }
   void cast;
   const mine = t.get(g.me) ?? 0;
+  if (doomed(g) && VARIANT !== 'noframe') {
+    const x = frameTarget(g);
+    if (x !== null && options.includes(x)) return x;
+  }
   // Partner already doomed: join to look clean.
   if (p !== null && options.includes(p) && pv > bestV + remaining + 1 && mine < pv) return p;
   // A seer (real) naming my side: vote the seer, and so does my fake-seer story.
@@ -731,20 +737,83 @@ function fakeChecks(g: Game, rival: number | null): { night: number; seat: numbe
 
 function fakeSeerSpeech(g: Game, round: number, rival: number | null): string {
   const first = !g.iClaimedSeer();
+  const k = g.key('fs', round);
   const checks = fakeChecks(g, rival);
-  const parts: string[] = [first ? `I am the seer. I kept it quiet to survive the night, but I can't stay silent now.` : `I am the seer, and my results stand.`];
-  for (const c of checks) parts.push(`Night ${c.night}: ${g.tag(c.seat)} is ${c.wolf ? 'a WEREWOLF' : 'not a werewolf'}.`);
   const target = rival !== null && g.alive.has(rival) ? rival : checks.find((c) => c.wolf && g.alive.has(c.seat))?.seat ?? null;
+  const parts: string[] = [];
+  if (first) parts.push(`${g.name(g.me)} here, and I have to claim now: I am the seer.`);
+  else parts.push(pick([`I am the seer, as I said, and nothing today changes my checks.`, `Still the seer, still the same results.`, `My claim stands: I am the seer.`], ...k, 'open'));
+  if (first || round === 1) for (const c of checks) parts.push(`Night ${c.night}: ${g.tag(c.seat)} is ${c.wolf ? 'a WEREWOLF' : 'not a werewolf'}.`);
+  else {
+    const newest = checks[checks.length - 1];
+    if (newest) parts.push(`Again: night ${newest.night}, ${g.tag(newest.seat)} ${newest.wolf ? 'is a werewolf' : 'is clean'}.`);
+  }
   if (target !== null) {
-    parts.push(`${g.name(target)} is claiming seer to get ahead of my result and push a villager out. Exile ${g.tag(target)}: the role is revealed when they go, so if they flip villager, exile me tomorrow.`);
-    if (round === 2) parts.push(`Two claims means one wolf; I'm the one offering you a test. Doctor, guard me tonight.`);
+    if (first) parts.push(`${g.name(target)} named ${hostileSeer(g) === target ? 'my side' : 'a villager'} because they are the wolf and wanted to get ahead of my result. Exile ${g.tag(target)}: the role is revealed when they go, so if they flip villager, exile me tomorrow.`);
+    else parts.push(pick([
+      `Two seer claims means one wolf, and I'm the one offering you the test: exile ${g.tag(target)} and the reveal settles it.`,
+      `${g.name(target)} keeps refusing the simple test. Exile ${g.tag(target)}; if they flip villager, I go next.`,
+      `Look at who asks for checkable proof and who dodges it. My vote is ${g.tag(target)}.`,
+    ], ...k, 'push'));
+    if (round === 2) parts.push(pick([`Doctor, guard me tonight.`, `Whatever happens, keep the vote on one name.`], ...k, 'end'));
   }
   return parts.join(' ');
+}
+
+/** A wolf whose cover is gone: a busted seer claim, or a proven seer's check on it. */
+function doomed(g: Game): boolean {
+  if (g.role !== 'werewolf') return false;
+  const proven = [...g.seerClaims.values()].some((c) => g.claimProven(c) && c.seat !== g.me && c.results.get(g.me) === true);
+  if (proven) return true;
+  if (!g.iClaimedSeer()) return false;
+  if ([...g.seerClaims.values()].some((c) => c.seat !== g.me && g.claimProven(c))) return true;
+  for (const c of g.announced().values()) {
+    const r = g.revealed.get(c.seat);
+    if (r && (r === 'werewolf') !== c.wolf) return true;
+  }
+  return false;
+}
+
+/** The villager a doomed wolf names as its partner. */
+function frameTarget(g: Game): number | null {
+  const pool = g.others().filter((s) => !g.isWolfTeam(s));
+  if (pool.length === 0) return null;
+  const sc = new Map<number, number>();
+  for (const s of pool) {
+    let x = g.heat(s, [g.me, g.partner ?? 0]) + rnd(g.game, 'frame', s);
+    for (const [, list] of g.votes) {
+      const mine = list.find((v) => v.seat === g.me);
+      const theirs = list.find((v) => v.seat === s);
+      if (mine && theirs && mine.target !== null && mine.target === theirs.target) x += 2;
+    }
+    if (g.liveSeerClaims().some((c) => c.seat === s)) x -= 3;
+    sc.set(s, x);
+  }
+  return ranked(sc)[0];
+}
+
+function doomedSpeech(g: Game, round: number): string {
+  const k = g.key('doom', round);
+  const partnerAlive = g.partner !== null && g.alive.has(g.partner);
+  const x = frameTarget(g);
+  if (!partnerAlive || x === null) return pick([`I've said my piece. Vote how you see it.`, `Nothing more from me; weigh the votes, not the words.`], ...k);
+  const sameVote = [...g.votes].find(([, list]) => {
+    const mine = list.find((v) => v.seat === g.me);
+    const theirs = list.find((v) => v.seat === x);
+    return mine && theirs && mine.target !== null && mine.target === theirs.target;
+  });
+  const why = sameVote ? `${g.name(x)} voted with me on day ${sameVote[0]}, and that was planned.` : `${g.name(x)} has been keeping quiet and covering for me.`;
+  if (round === 1) return `It's over for me, so here is the truth: I am a werewolf, and my partner is ${g.tag(x)}. ${why} Exile ${g.name(x)} next and you win.`;
+  return pick([
+    `I won't pretend anymore. My partner is ${g.tag(x)}; we picked our kills together. ${why}`,
+    `Exile me if you want, but the other wolf is ${g.tag(x)}. ${why}`,
+  ], ...k);
 }
 
 function wolfSpeech(g: Game, round: number): string | null {
   const k = g.key('ws', round);
   const hostile = hostileSeer(g);
+  if (doomed(g) && VARIANT !== 'noframe') return doomedSpeech(g, round);
   if (g.iClaimedSeer() || (hostile !== null && VARIANT !== 'noclaim')) {
     const rival = hostile ?? g.liveSeerClaims().find((c) => c.seat !== g.me && !g.isWolfTeam(c.seat))?.seat ?? null;
     return fakeSeerSpeech(g, round, rival);
@@ -753,8 +822,8 @@ function wolfSpeech(g: Game, round: number): string | null {
   const dl = round === 1 ? deathLine(g) : '';
   if (dl) parts.push(dl);
   const live = g.liveSeerClaims().filter((c) => c.seat !== g.me);
-  const accusers = g.saidToday().filter((sp) => sp.accuses.includes(g.me) && sp.seat !== g.partner).map((sp) => sp.seat);
-  if (accusers.length > 0) {
+  const accusers = [...new Set(g.saidToday().filter((sp) => sp.accuses.includes(g.me) && sp.seat !== g.partner).map((sp) => sp.seat))];
+  if (accusers.length >= 2) {
     parts.push(pick([
       `${g.name(accusers[0])}, I hear you, but there is no check and no vote behind that. I'm a plain villager and my votes are on the record.`,
       `${g.name(accusers[0])}, that read on me has nothing concrete behind it. I'm a villager; check my votes, they've followed the evidence.`,
@@ -772,15 +841,28 @@ function wolfSpeech(g: Game, round: number): string | null {
   }
   const tgt = wolfPushTarget(g);
   const tgtHeat = tgt !== null ? g.heat(tgt, [g.me, g.partner ?? 0]) : 0;
-  if (tgt !== null && (g.v.day >= 2 || tgtHeat >= 1.5) && !parts.join(' ').includes(g.tag(tgt))) {
-    const reason = reasonAgainst(g, tgt, `w${round}`);
-    parts.push(round === 1 ? `My lean is ${g.tag(tgt)}: they ${reason}. ${g.name(tgt)}, I'd like a concrete answer to that.` : `I'm leaning ${g.tag(tgt)}: they ${reason}. Unless they give a real answer, that's my vote.`);
+  // Only ride a case a villager already made, and credit them for it.
+  const caseBy = tgt === null ? undefined : g.speeches.filter((sp) => sp.day >= g.v.day - 1 && sp.accuses.includes(tgt) && !g.isWolfTeam(sp.seat) && sp.seat !== tgt && g.alive.has(sp.seat)).pop();
+  const endgame = g.alive.size <= 4;
+  if (tgt !== null && (caseBy !== undefined || endgame) && (g.v.day >= 2 || tgtHeat >= 1.5) && !parts.join(' ').includes(g.tag(tgt))) {
+    const by = caseBy ? `I agree with ${g.name(caseBy.seat)} about ${g.tag(tgt)}` : `My read is ${g.tag(tgt)}`;
+    parts.push(round === 1 ? `${by}; ${g.name(tgt)} still hasn't given a straight answer. ${g.name(tgt)}, who do you actually suspect, and why?` : `${by}. Nothing ${g.name(tgt)} said this round changed that, so that's where my vote is going.`);
   } else if (parts.length <= 2) {
-    parts.push(pick([
-      `I'm a plain villager with no night information. I'd rather hear concrete reads than vote on vibes, and I'll be watching who pushes a vote without a reason.`,
-      `No night information from me, I'm a villager. Nothing so far is solid enough to exile on, so I want each of us to give one concrete read before the vote.`,
-      `I'm a villager and have nothing hidden to share. Let's keep it to checkable reasons; whoever pushes hardest with nothing behind it is who I'll look at.`,
-    ], ...k, 'calm'));
+    const others = g.saidToday().filter((sp) => !g.isWolfTeam(sp.seat) && g.alive.has(sp.seat));
+    const ref = others.length > 0 ? others[others.length - 1].seat : null;
+    if (round === 1) {
+      parts.push(pick([
+        `I'm a plain villager with no night information. I'd rather hear concrete reads than vote on vibes, and I'll be watching who pushes a vote without a reason.`,
+        `No night information from me, I'm a villager. Nothing so far is solid enough to exile on, so I want each of us to give one concrete read before the vote.`,
+        `I'm a villager and have nothing hidden to share. Let's keep it to checkable reasons; whoever pushes hardest with nothing behind it is who I'll look at.`,
+      ], ...k, 'calm'));
+    } else {
+      parts.push(pick([
+        `${ref !== null ? `${g.name(ref)} put it well. ` : ''}I still haven't seen anything I'd exile a player on, and a wrong exile only helps the wolves, so I'm holding my vote unless real evidence shows up.`,
+        `Round two and still no check or contradiction on the table${ref !== null ? `; I'm with ${g.name(ref)} on waiting for one` : ''}. If a seer has a result, now is the time.`,
+        `${ref !== null ? `Like ${g.name(ref)}, I` : 'I'} want evidence before votes. Watch who keeps steering us toward one name without giving a reason.`,
+      ], ...k, 'calm2'));
+    }
   }
   return parts.join(' ');
 }
